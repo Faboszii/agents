@@ -526,30 +526,34 @@ When a fork PR arrives, the AI review workflow:
 2. **Fails visibly** with an error explaining the fork limitation
 3. Posts no green check that could be mistaken for a completed review
 
-### Automatic trigger on approval (preferred)
+### Automatic trigger via label (preferred)
 
-The **easiest path** for fork PRs: just approve them. When you approve a fork PR,
-the advisory review **automatically triggers** in the base repository context:
+The **preferred path** for fork PRs: add the `ai-review` label after reviewing
+the code. This triggers the advisory review in a privileged context:
 
 1. Fork PR arrives
 2. Automatic review fails visibly (GitHub withholds variables from fork PRs)
-3. Workflow posts a comment with instructions (see below)
-4. **You review the code and approve** (normal PR workflow)
-5. **Your approval triggers the advisory review automatically**
-6. Advisory runs safely in base-repo context and posts findings
+3. **You review the code**
+4. **You add the 'ai-review' label** (trust signal)
+5. Label addition triggers the advisory review in base-repo context
+6. Advisory runs with access to credentials and posts findings
 
-This is the preferred flow because it requires no extra steps — you approve when
-the code looks good, and the advisory runs automatically.
+**Why label-gated instead of approval-gated?** GitHub withholds secrets and
+variables from `pull_request_review` events on fork PRs ([GitHub docs](https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions#using-secrets-in-a-workflow)),
+so an approval cannot auto-trigger a privileged review. The label gate uses
+`pull_request_target: [labeled]` which **does** have access to credentials, and
+is safe because label addition is maintainer-only and the workflow never checks
+out PR code.
 
 **What happens after the advisory runs:**
 
-- **No blocking findings:** Your approval stands, PR is mergeable
-- **Blocking findings (critical/high):** The workflow **dismisses your approval**
-  with a message linking to the advisory comment. The PR becomes non-mergeable
-  until you (or another maintainer) **re-approve** after reviewing the advisory.
-  This ensures findings are seen before merge without making the advisory itself
-  a required check (phase 1 is advisory-only).
-- **Advisory halts or fails:** Your approval stands (a halt/error is not a verdict)
+- **No blocking findings:** Label remains, PR proceeds normally
+- **Blocking findings (critical/high):** The workflow **removes the `ai-review` label**
+  as a signal. Review the advisory comment posted by @noemi-reviewer-bot, then
+  either request changes or **re-add the label** after the contributor addresses
+  findings (or if you accept them). This ensures findings are seen without making
+  the advisory a required check (phase 1 is advisory-only).
+- **Advisory halts or fails:** Label remains (a halt/error is not a verdict)
 
 ### Manual trigger (when needed)
 

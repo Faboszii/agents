@@ -9,34 +9,40 @@
 # block a merge is a gate; phase 1 is an advisory signal being calibrated. Do
 # not add it to branch protection contexts before phase 2.
 #
-# FORK PR HANDLING: This workflow triggers on `pull_request` and
-# `pull_request_review` for in-repo and fork PRs, plus `workflow_dispatch` for
-# manual runs. Fork PRs receive special handling:
+# FORK PR HANDLING: This workflow triggers on `pull_request`,
+# `pull_request_target` (labeled only), and `workflow_dispatch`. Fork PRs
+# receive special handling due to GitHub's security model:
 #
-# 1. On `pull_request` (fork PR arrives): Configuration unavailable (GitHub
-#    withholds org variables from forks), so the workflow FAILS VISIBLY and
-#    posts a comment with manual trigger instructions. A green check with no
-#    review would be indistinguishable from a completed review.
+# CRITICAL: GitHub withholds repository/org secrets and variables from
+# pull_request, pull_request_review, and pull_request_review_comment events
+# on fork PRs (https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions#using-secrets-in-a-workflow).
+# This means pull_request_review CANNOT auto-trigger privileged review on fork
+# approval — it has the same empty-vars restriction as pull_request.
 #
-# 2. On `pull_request_review` (maintainer approves fork PR): The advisory review
-#    AUTO-TRIGGERS in the base repository context with access to configuration.
-#    This eliminates manual dispatch in most cases. If the advisory finds
-#    blocking findings (critical/high), the workflow DISMISSES THE APPROVAL that
-#    triggered it, making the PR non-mergeable until a maintainer re-approves
-#    after reviewing the advisory comment. No blocking findings → approval stands.
+# Fork PR flow:
 #
-# 3. On `workflow_dispatch`: Maintainers can manually trigger the review before
-#    approving, or retry after a failure.
+# 1. On `pull_request` (fork PR arrives/updates): Configuration unavailable, so
+#    the workflow FAILS VISIBLY. Error message instructs maintainers to add the
+#    'ai-review' label (preferred) or use workflow_dispatch (fallback).
 #
-# SAFETY: Fork PR review on `pull_request_review` and `workflow_dispatch` runs
-# in the base repository context and is safe because:
-#   1. The workflow NEVER checks out the PR head — only project-noemi/agents
-#      at a pinned ref trusted by the base repository
-#   2. The diff is fetched over the API as read-only data, never executed
-#   3. Review scripts come from the tooling repo, not from the PR under review
-# A PR cannot rewrite the reviewer that judges it. The `pull_request` trigger
-# (which fails on fork PRs) runs in the fork context but performs no sensitive
-# operations — it only checks for missing variables and posts a comment.
+# 2. On `pull_request_target: [labeled]` with label='ai-review': MAINTAINER-GATED
+#    privileged review. Runs in base repository context with access to secrets/
+#    variables. If the advisory finds blocking findings (critical/high), the
+#    workflow REMOVES THE LABEL, signaling the PR needs attention. Maintainer
+#    must review advisory findings, then either request changes or re-add label
+#    after contributor addresses findings.
+#
+# 3. On `workflow_dispatch`: Manual trigger (base context, privileged). Does not
+#    remove label on blocking findings — maintainer explicitly requested review.
+#
+# LABEL GATE SAFETY: The pull_request_target: [labeled] trigger ONLY fires when
+# a maintainer adds the 'ai-review' label, and the job condition verifies
+# github.event.label.name == 'ai-review'. This prevents:
+#   - Auto-review on open/sync (would be unconstrained pull_request_target)
+#   - Review triggered by non-maintainer labels (label addition is privileged)
+#   - Malicious fork triggering privileged review without maintainer action
+# The workflow still NEVER checks out PR head code (only project-noemi/agents
+# at pinned ref), fetches diff via API only, and uses tooling-repo scripts.
 #
 # FLEET DEPLOYMENT: this is a REUSABLE workflow (workflow_call). Other
 # repositories run the reviewer through a thin caller — see
@@ -59,8 +65,8 @@ name: AI Review (advisory)
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  pull_request_review:
-    types: [submitted]
+  pull_request_target:
+    types: [labeled]
   workflow_dispatch:
     inputs:
       pr:
@@ -96,22 +102,23 @@ jobs:
   review:
     name: Cross-Model PR Review
     runs-on: ubuntu-latest
-    # Skip on non-approval reviews (commented, changes_requested, etc.)
-    # Also skip if this is a fork PR review event but not an approval
+    # Label-gated privileged review: only proceed when the maintainer-added
+    # label is present. On pull_request_target, verify the label that triggered
+    # the run is the trusted label. On other triggers, proceed normally.
     if: |
-      github.event_name != 'pull_request_review' ||
-      (github.event.review.state == 'approved' && github.event.pull_request.head.repo.fork == true)
+      github.event_name != 'pull_request_target' ||
+      github.event.label.name == 'ai-review'
     steps:
-      # When triggered by pull_request_review, resolve the PR number from the event
-      - name: Resolve PR number
+      # Resolve PR number from event or input
+      - name: Resolve PR number and trigger context
         id: pr
         run: |
-          if [[ "${{ github.event_name }}" == "pull_request_review" ]]; then
+          if [[ "${{ github.event_name }}" == "pull_request_target" ]]; then
             echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
-            echo "is_fork_approval=true" >> "$GITHUB_OUTPUT"
+            echo "is_label_gated=true" >> "$GITHUB_OUTPUT"
           else
             echo "number=${{ github.event.pull_request.number || inputs.pr }}" >> "$GITHUB_OUTPUT"
-            echo "is_fork_approval=false" >> "$GITHUB_OUTPUT"
+            echo "is_label_gated=false" >> "$GITHUB_OUTPUT"
           fi
       # ALWAYS the tooling repo at a pinned ref — never the PR head. The runner
       # fetches the diff over the API, so nothing from the reviewed PR's working
@@ -150,54 +157,9 @@ jobs:
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # Post instructions when configuration is unavailable. This gives
-      # maintainers the exact steps to manually trigger the review.
-      # Idempotent: only posts if a recent identical comment doesn't exist.
-      - name: Post fork PR instructions
-        if: steps.config.outputs.configured == 'false' && steps.pr.outputs.number && steps.pr.outputs.is_fork_approval == 'false'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-          REPO: ${{ github.repository }}
-          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/ai-review.yml
-        run: |
-          # Only post if this is a fork PR (not just missing config on an in-repo branch)
-          IS_FORK=$(gh api repos/${REPO}/pulls/${PR_NUMBER} --jq '.head.repo.fork // false')
-          if [[ "$IS_FORK" != "true" ]]; then
-            exit 0
-          fi
-          
-          # Check if we already posted this comment (avoid re-posting on every synchronize)
-          MARKER="🤖 AI Review — Manual Trigger Required"
-          EXISTING=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" \
-            --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" | head -1)
-          
-          if [[ -n "$EXISTING" ]]; then
-            echo "::notice title=Instructions already posted::Comment $EXISTING exists; skipping duplicate."
-            exit 0
-          fi
-          
-          BRANCH=$(gh api repos/${REPO}/pulls/${PR_NUMBER} --jq '.base.ref')
-          gh pr comment ${PR_NUMBER} --body "## 🤖 AI Review — Manual Trigger Required
-
-This is a fork pull request. GitHub's security model prevents fork PRs from accessing organization Actions variables, so the advisory AI review cannot run automatically.
-
-### How to run the review manually
-
-A maintainer can trigger the advisory review via **workflow dispatch**:
-
-1. Go to [**Actions → AI Review (advisory)**](${WORKFLOW_URL})
-2. Click **Run workflow**
-3. Select branch: \`${BRANCH}\`
-4. Enter PR number: \`${PR_NUMBER}\`
-5. Click **Run workflow**
-
-The review will run in the base repository context with access to configuration (safe: never executes fork code, fetches diff via API only).
-
-Alternatively, wait for an approving review — the advisory will trigger automatically after the first approval.
-
----
-_Automated message from the AI review workflow. See [\`docs/AI_REVIEW_GOVERNANCE.md § Fork Pull Requests\`](https://github.com/${REPO}/blob/develop/docs/AI_REVIEW_GOVERNANCE.md#fork-pull-requests) for details._"
+      # Note: Cannot post comment from fork-restricted pull_request context
+      # (GITHUB_TOKEN is read-only). Maintainers see the error message below
+      # with instructions to add the ai-review label or use workflow_dispatch.
 
       # Fail visibly when configuration is unavailable. Fork PRs cannot access
       # repository/org Actions variables (GitHub security model), so they reach
@@ -206,7 +168,7 @@ _Automated message from the AI review workflow. See [\`docs/AI_REVIEW_GOVERNANCE
       - name: Fail on missing configuration
         if: steps.config.outputs.configured == 'false'
         run: |
-          echo "::error title=AI review unavailable::Missing Actions variables: ${{ steps.config.outputs.missing }}. Fork PRs cannot access org variables; maintainers can trigger a review via workflow_dispatch after the PR is opened. In-repo branches: set variables at the organization level. See docs/examples/cross-model-review-setup.md and docs/AI_REVIEW_GOVERNANCE.md § Fork Pull Requests."
+          echo "::error title=AI review unavailable::Missing Actions variables: ${{ steps.config.outputs.missing }}. For FORK PRs: GitHub withholds secrets/variables from pull_request, pull_request_review, and pull_request_review_comment (https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions#using-secrets-in-a-workflow). Maintainers: add the 'ai-review' label to trigger the privileged advisory review, or use workflow_dispatch (Actions → AI Review → Run workflow). For IN-REPO branches: set variables at the organization level. See docs/AI_REVIEW_GOVERNANCE.md § Fork Pull Requests."
           exit 1
 
       # Federation, not a key. This organization's policy disallows both API
@@ -380,32 +342,30 @@ _Automated message from the AI review workflow. See [\`docs/AI_REVIEW_GOVERNANCE
           fi
           exit $code
 
-      # Dismiss the triggering approval when the advisory found blocking findings
-      # on a fork PR. This makes the PR non-mergeable until a maintainer
-      # re-approves after seeing the advisory comment. Phase 1 is advisory-only
-      # and not a required check, so dismissal is the mechanism by which fork PRs
-      # with findings become non-green without making the advisory itself blocking.
-      - name: Dismiss approval if blocking findings on fork PR
+      # After label-gated review with blocking findings, remove the label to signal
+      # that the PR needs attention. Maintainers must review the advisory findings
+      # and either request changes or re-add the label to re-run the review.
+      # This provides a visible gate without making the advisory a required check
+      # (phase 1 is advisory-only).
+      - name: Remove label if blocking findings after label-gated review
         if: |
           always() &&
-          steps.pr.outputs.is_fork_approval == 'true' &&
+          steps.pr.outputs.is_label_gated == 'true' &&
           steps.config.outputs.configured == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
-          REVIEW_ID: ${{ github.event.review.id }}
           FINDINGS_FILE: ${{ runner.temp }}/ai-review-findings.json
         run: |
           if [[ -f "$FINDINGS_FILE" ]]; then
             BLOCKING_COUNT=$(jq -r '.blocking_count // 0' "$FINDINGS_FILE")
             if (( BLOCKING_COUNT > 0 )); then
-              gh api --method PUT \
-                "repos/${{ github.repository }}/pulls/${PR_NUMBER}/reviews/${REVIEW_ID}/dismissals" \
-                -f message="Dismissing approval because the advisory AI review found ${BLOCKING_COUNT} blocking finding(s) (critical or high severity). Please review the advisory comment posted by @noemi-reviewer-bot, address the findings, and re-approve when ready. See docs/AI_REVIEW_GOVERNANCE.md § Fork Pull Requests § Re-approval after Advisory for details." \
-                -f event=DISMISS
-              echo "::notice title=Approval dismissed::Advisory found ${BLOCKING_COUNT} blocking findings. Dismissed the triggering approval; PR now requires re-approval after maintainer reviews advisory comment."
+              # Remove the label that gated this review
+              gh api --method DELETE \
+                "repos/${{ github.repository }}/issues/${PR_NUMBER}/labels/ai-review" || true
+              echo "::warning title=Label removed after blocking findings::Advisory found ${BLOCKING_COUNT} blocking finding(s). Removed 'ai-review' label. Maintainer: review the advisory comment posted by @noemi-reviewer-bot, then either request changes or re-add the label after contributor addresses findings. See docs/AI_REVIEW_GOVERNANCE.md § Fork Pull Requests."
             else
-              echo "::notice title=No blocking findings::Advisory completed with no blocking findings; approval stands."
+              echo "::notice title=No blocking findings::Advisory completed with no blocking findings."
             fi
           else
             echo "::notice title=No findings marker::Review completed but no findings marker file found; assuming no blocking findings."

@@ -204,8 +204,14 @@ and is reported as such.
 ## Fork Pull Requests
 
 GitHub's security model withholds repository and organization Actions variables
-from workflows triggered by fork pull requests on the `pull_request` event. This
-prevents malicious fork PRs from exfiltrating secrets via workflow code.
+and secrets from workflows triggered by fork pull requests on the `pull_request`,
+`pull_request_review`, and `pull_request_review_comment` events ([GitHub docs](https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions#using-secrets-in-a-workflow)).
+This prevents malicious fork PRs from exfiltrating secrets via workflow code.
+
+**Critical implication:** An approval-triggered `pull_request_review` workflow on
+a fork PR **cannot access Infisical/GCP credentials** and will fail with the same
+empty-vars restriction as `pull_request`. Auto-trigger-on-approval is not viable
+for fork PRs without using `pull_request_target`, which requires careful gating.
 
 When the AI review workflow runs on a fork PR via `pull_request`, configuration
 variables (`INFISICAL_PROJECT_ID`, etc.) are empty, and **the review fails
@@ -232,56 +238,67 @@ access to configuration, but remains safe because:
 - Review scripts come from the base repo, not from the PR, so a malicious PR
   cannot rewrite the reviewer that judges it
 
-### Auto-trigger on approval (preferred path)
+### Label-gated privileged review (preferred path)
 
-When a maintainer **approves** a fork PR, the advisory review **automatically
-triggers** in the base repository context via the `pull_request_review` event.
-This eliminates the need for manual `workflow_dispatch` in most cases:
+When a maintainer adds the **`ai-review` label** to a fork PR, the advisory
+review **automatically triggers** in the base repository context via
+`pull_request_target: types: [labeled]`:
 
 1. Fork PR arrives → automatic review fails visibly (no variables)
-2. Workflow posts a comment with manual trigger instructions
-3. Maintainer reviews the code and approves
-4. **Approval triggers the advisory review automatically**
-5. Advisory runs in base-repo context (safe: same design as dispatch)
+2. Maintainer reviews the code
+3. **Maintainer adds 'ai-review' label** (trust signal)
+4. Label addition triggers the advisory review in base context
+5. Advisory runs with access to Infisical/GCP credentials
 6. Advisory findings posted as a comment
 
-This flow is safe because it inherits the same protections as `workflow_dispatch`:
-no PR code checkout, API-fetched diff only, tooling-repo scripts.
+**Why label-gated instead of approval-gated?** GitHub withholds secrets/variables
+from `pull_request_review` on fork PRs (same restriction as `pull_request`), so
+approval cannot auto-trigger a privileged review. The label gate uses
+`pull_request_target: [labeled]` which **does** have access to secrets/variables,
+but is safe because:
 
-### Re-approval after advisory
+- Label addition is a **maintainer-only action** (requires triage permission)
+- Job condition verifies `github.event.label.name == 'ai-review'` (no other labels)
+- Does NOT trigger on open/synchronize (avoids unconstrained `pull_request_target`)
+- Workflow still never checks out PR head code (only tooling repo at pinned ref)
+- Diff fetched via API only (read-only data, never executed)
+- Review scripts from tooling repo, not from PR under review
 
-When the auto-triggered advisory review finds **blocking findings** (critical or
-high severity) on a fork PR, the workflow **dismisses the approval that triggered
-it** with a message referencing the advisory comment. This makes the PR
-**non-mergeable** until a maintainer:
+### Re-review after advisory findings
 
-1. Reads the advisory findings posted by `@noemi-reviewer-bot`
+When the label-gated advisory review finds **blocking findings** (critical or
+high severity) on a fork PR, the workflow **removes the `ai-review` label** that
+gated the review. This signals that the PR needs attention:
+
+1. Maintainer reads the advisory findings posted by `@noemi-reviewer-bot`
 2. Determines whether the findings are valid
 3. Either requests changes from the contributor, or
-4. Re-approves the PR (accepting the findings or disagreeing with them)
+4. Re-adds the `ai-review` label to re-run the advisory (after contributor
+   addresses findings or if maintainer accepts them)
 
-**Why dismissal, not a required check?** Phase 1 is advisory-only. The review is
-intentionally **not** a required status check (see **Phased rollout** below) —
-it posts findings, and a human decides what to do. Making it block merges would
-advance to phase 2 without the calibration evidence that phase 2 requires.
+**Why remove the label instead of making the advisory a required check?** Phase 1
+is advisory-only. The review is intentionally **not** a required status check
+(see **Phased rollout** below) — it posts findings, and a human decides what to
+do. Making it block merges would advance to phase 2 without the calibration
+evidence that phase 2 requires.
 
-Dismissing the triggering approval when blocking findings exist provides a
-**merge gate without changing the advisory's status**: the PR becomes non-green
-not because the advisory failed, but because the prior approval is no longer
-current. A maintainer who re-approves after reading the advisory is making an
-informed decision, which is the point.
+Removing the label when blocking findings exist provides a **visible signal
+without changing the advisory's status**: the maintainer must consciously re-add
+the label (or use workflow_dispatch) to re-run the review after seeing the
+findings. This ensures blocking findings are acknowledged without making the
+advisory itself a merge gate.
 
 **Non-blocking outcomes:**
-- If the advisory finds **no blocking findings**, the approval stands and the PR
-  remains mergeable.
+- If the advisory finds **no blocking findings**, the label remains and the PR
+  stays in a normal state.
 - If the advisory **halts** (carve-out, Sentinel spec missing, model floor not
-  met), the approval stands — a halt is an escalation, not a review verdict.
+  met), the label remains — a halt is an escalation, not a review verdict.
 - If the advisory **fails** due to an error (API unavailable, timeout, etc.),
-  the approval stands and the failure is visible in the workflow run.
+  the label remains and the failure is visible in the workflow run.
 
-This mechanism applies **only to fork PRs** where the review was auto-triggered by
-an approval (`pull_request_review` event with `state: approved`). In-repo branch
-PRs and manually dispatched reviews do not dismiss approvals.
+This mechanism applies **only to fork PRs** where the review was triggered by the
+`ai-review` label (`pull_request_target: [labeled]` event). In-repo branch PRs
+and manually dispatched reviews do not remove labels.
 
 ### Residual risks
 
@@ -295,18 +312,26 @@ PRs and manually dispatched reviews do not dismiss approvals.
    - **Severity:** Low — requires both defeating the carve-out gate AND bypassing
      human code-owner review
 
-**2. Approval dismissal abuse:**
+**2. Label removal abuse:**
    - **Risk:** A malicious fork PR could craft a diff that causes the advisory to
-     spuriously report blocking findings, triggering dismissal of a legitimate
-     approval
+     spuriously report blocking findings, triggering removal of the `ai-review`
+     label
    - **Mitigation:** The advisory reviews code content, not code execution, so a
      malicious diff would need to defeat the Gemini reviewer's detection of
-     injection attempts (prompt injection is itself a critical finding). The
-     dismissal message includes the findings count and links to the advisory
-     comment, so spurious dismissals are visible and can be overridden by
-     re-approving
+     injection attempts (prompt injection is itself a critical finding). Label
+     removal is visible in the PR timeline, and the maintainer can re-add the
+     label to re-run the review or use workflow_dispatch
    - **Severity:** Low — requires defeating cross-model adversarial review, and
-     the maintainer can override by re-approving
+     the maintainer can override by re-adding the label
+
+**3. Label gate bypass via non-maintainer:**
+   - **Risk:** A non-maintainer (external contributor) could add a label that
+     triggers privileged review
+   - **Mitigation:** GitHub's permissions model restricts label addition on fork
+     PRs to users with triage permission or higher. External contributors cannot
+     add labels to their own fork PRs in the base repository. The job condition
+     also explicitly checks `github.event.label.name == 'ai-review'`
+   - **Severity:** Prevented by GitHub's permission model
 
 ## Audit
 
