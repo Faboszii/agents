@@ -232,11 +232,6 @@ access to configuration, but remains safe because:
 - Review scripts come from the base repo, not from the PR, so a malicious PR
   cannot rewrite the reviewer that judges it
 
-The workflow also triggers on `pull_request_target`, which runs in the base
-repository context with variables available. This is equally safe for the same
-reasons: no PR code is executed, the diff is API-fetched data, and the carve-out
-gate halts any attempt to modify the review workflow itself.
-
 ### Auto-trigger on approval (preferred path)
 
 When a maintainer **approves** a fork PR, the advisory review **automatically

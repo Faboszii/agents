@@ -571,9 +571,6 @@ access to configuration variables. This is safe because:
 - Review scripts come from the base repo, not from the PR, so a malicious PR
   cannot rewrite its own reviewer
 
-The workflow also triggers on `pull_request_target`, which runs in the base
-repository context automatically. This is equally safe for the same reasons.
-
 **Note:** When the automatic review fails and posts instructions, those
 instructions include the direct workflow URL pre-filled with the correct branch
 and PR number — click through and confirm rather than manually entering values.

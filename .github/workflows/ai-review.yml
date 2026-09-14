@@ -9,9 +9,9 @@
 # block a merge is a gate; phase 1 is an advisory signal being calibrated. Do
 # not add it to branch protection contexts before phase 2.
 #
-# FORK PR HANDLING: This workflow triggers on `pull_request`,
-# `pull_request_target`, and `pull_request_review`. Fork PRs receive special
-# handling:
+# FORK PR HANDLING: This workflow triggers on `pull_request` and
+# `pull_request_review` for in-repo and fork PRs, plus `workflow_dispatch` for
+# manual runs. Fork PRs receive special handling:
 #
 # 1. On `pull_request` (fork PR arrives): Configuration unavailable (GitHub
 #    withholds org variables from forks), so the workflow FAILS VISIBLY and
@@ -28,13 +28,15 @@
 # 3. On `workflow_dispatch`: Maintainers can manually trigger the review before
 #    approving, or retry after a failure.
 #
-# SAFETY: All fork PR review paths (pull_request_target, pull_request_review,
-# workflow_dispatch) run in the base repository context and are safe because:
+# SAFETY: Fork PR review on `pull_request_review` and `workflow_dispatch` runs
+# in the base repository context and is safe because:
 #   1. The workflow NEVER checks out the PR head — only project-noemi/agents
 #      at a pinned ref trusted by the base repository
 #   2. The diff is fetched over the API as read-only data, never executed
 #   3. Review scripts come from the tooling repo, not from the PR under review
-# A PR cannot rewrite the reviewer that judges it.
+# A PR cannot rewrite the reviewer that judges it. The `pull_request` trigger
+# (which fails on fork PRs) runs in the fork context but performs no sensitive
+# operations — it only checks for missing variables and posts a comment.
 #
 # FLEET DEPLOYMENT: this is a REUSABLE workflow (workflow_call). Other
 # repositories run the reviewer through a thin caller — see
@@ -56,8 +58,6 @@ name: AI Review (advisory)
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
-  pull_request_target:
     types: [opened, synchronize, reopened]
   pull_request_review:
     types: [submitted]
@@ -152,6 +152,7 @@ jobs:
 
       # Post instructions when configuration is unavailable. This gives
       # maintainers the exact steps to manually trigger the review.
+      # Idempotent: only posts if a recent identical comment doesn't exist.
       - name: Post fork PR instructions
         if: steps.config.outputs.configured == 'false' && steps.pr.outputs.number && steps.pr.outputs.is_fork_approval == 'false'
         env:
@@ -162,9 +163,22 @@ jobs:
         run: |
           # Only post if this is a fork PR (not just missing config on an in-repo branch)
           IS_FORK=$(gh api repos/${REPO}/pulls/${PR_NUMBER} --jq '.head.repo.fork // false')
-          if [[ "$IS_FORK" == "true" ]]; then
-            BRANCH=$(gh api repos/${REPO}/pulls/${PR_NUMBER} --jq '.base.ref')
-            gh pr comment ${PR_NUMBER} --body "## 🤖 AI Review — Manual Trigger Required
+          if [[ "$IS_FORK" != "true" ]]; then
+            exit 0
+          fi
+          
+          # Check if we already posted this comment (avoid re-posting on every synchronize)
+          MARKER="🤖 AI Review — Manual Trigger Required"
+          EXISTING=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" \
+            --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" | head -1)
+          
+          if [[ -n "$EXISTING" ]]; then
+            echo "::notice title=Instructions already posted::Comment $EXISTING exists; skipping duplicate."
+            exit 0
+          fi
+          
+          BRANCH=$(gh api repos/${REPO}/pulls/${PR_NUMBER} --jq '.base.ref')
+          gh pr comment ${PR_NUMBER} --body "## 🤖 AI Review — Manual Trigger Required
 
 This is a fork pull request. GitHub's security model prevents fork PRs from accessing organization Actions variables, so the advisory AI review cannot run automatically.
 
@@ -184,7 +198,6 @@ Alternatively, wait for an approving review — the advisory will trigger automa
 
 ---
 _Automated message from the AI review workflow. See [\`docs/AI_REVIEW_GOVERNANCE.md § Fork Pull Requests\`](https://github.com/${REPO}/blob/develop/docs/AI_REVIEW_GOVERNANCE.md#fork-pull-requests) for details._"
-          fi
 
       # Fail visibly when configuration is unavailable. Fork PRs cannot access
       # repository/org Actions variables (GitHub security model), so they reach
