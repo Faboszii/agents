@@ -9,17 +9,32 @@
 # block a merge is a gate; phase 1 is an advisory signal being calibrated. Do
 # not add it to branch protection contexts before phase 2.
 #
-# FORK PR SAFETY: This workflow triggers on both `pull_request` and
-# `pull_request_target`. The latter runs in the base repository context with
-# access to Actions variables, allowing fork PRs to be reviewed. This is safe
-# because:
+# FORK PR HANDLING: This workflow triggers on `pull_request`,
+# `pull_request_target`, and `pull_request_review`. Fork PRs receive special
+# handling:
+#
+# 1. On `pull_request` (fork PR arrives): Configuration unavailable (GitHub
+#    withholds org variables from forks), so the workflow FAILS VISIBLY and
+#    posts a comment with manual trigger instructions. A green check with no
+#    review would be indistinguishable from a completed review.
+#
+# 2. On `pull_request_review` (maintainer approves fork PR): The advisory review
+#    AUTO-TRIGGERS in the base repository context with access to configuration.
+#    This eliminates manual dispatch in most cases. If the advisory finds
+#    blocking findings (critical/high), the workflow DISMISSES THE APPROVAL that
+#    triggered it, making the PR non-mergeable until a maintainer re-approves
+#    after reviewing the advisory comment. No blocking findings → approval stands.
+#
+# 3. On `workflow_dispatch`: Maintainers can manually trigger the review before
+#    approving, or retry after a failure.
+#
+# SAFETY: All fork PR review paths (pull_request_target, pull_request_review,
+# workflow_dispatch) run in the base repository context and are safe because:
 #   1. The workflow NEVER checks out the PR head — only project-noemi/agents
 #      at a pinned ref trusted by the base repository
 #   2. The diff is fetched over the API as read-only data, never executed
 #   3. Review scripts come from the tooling repo, not from the PR under review
-# When configuration is unavailable (fork PRs on `pull_request` with no vars),
-# the workflow FAILS VISIBLY instead of silently succeeding. A green check with
-# no review comment would be indistinguishable from a completed review.
+# A PR cannot rewrite the reviewer that judges it.
 #
 # FLEET DEPLOYMENT: this is a REUSABLE workflow (workflow_call). Other
 # repositories run the reviewer through a thin caller — see
@@ -44,6 +59,8 @@ on:
     types: [opened, synchronize, reopened]
   pull_request_target:
     types: [opened, synchronize, reopened]
+  pull_request_review:
+    types: [submitted]
   workflow_dispatch:
     inputs:
       pr:
@@ -79,7 +96,23 @@ jobs:
   review:
     name: Cross-Model PR Review
     runs-on: ubuntu-latest
+    # Skip on non-approval reviews (commented, changes_requested, etc.)
+    # Also skip if this is a fork PR review event but not an approval
+    if: |
+      github.event_name != 'pull_request_review' ||
+      (github.event.review.state == 'approved' && github.event.pull_request.head.repo.fork == true)
     steps:
+      # When triggered by pull_request_review, resolve the PR number from the event
+      - name: Resolve PR number
+        id: pr
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request_review" ]]; then
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+            echo "is_fork_approval=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.pull_request.number || inputs.pr }}" >> "$GITHUB_OUTPUT"
+            echo "is_fork_approval=false" >> "$GITHUB_OUTPUT"
+          fi
       # ALWAYS the tooling repo at a pinned ref — never the PR head. The runner
       # fetches the diff over the API, so nothing from the reviewed PR's working
       # tree is needed or wanted: scripts taken from the PR would let a PR
@@ -115,6 +148,42 @@ jobs:
             echo "missing=${missing[*]}" >> "$GITHUB_OUTPUT"
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Post instructions when configuration is unavailable. This gives
+      # maintainers the exact steps to manually trigger the review.
+      - name: Post fork PR instructions
+        if: steps.config.outputs.configured == 'false' && steps.pr.outputs.number && steps.pr.outputs.is_fork_approval == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REPO: ${{ github.repository }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/workflows/ai-review.yml
+        run: |
+          # Only post if this is a fork PR (not just missing config on an in-repo branch)
+          IS_FORK=$(gh api repos/${REPO}/pulls/${PR_NUMBER} --jq '.head.repo.fork // false')
+          if [[ "$IS_FORK" == "true" ]]; then
+            BRANCH=$(gh api repos/${REPO}/pulls/${PR_NUMBER} --jq '.base.ref')
+            gh pr comment ${PR_NUMBER} --body "## 🤖 AI Review — Manual Trigger Required
+
+This is a fork pull request. GitHub's security model prevents fork PRs from accessing organization Actions variables, so the advisory AI review cannot run automatically.
+
+### How to run the review manually
+
+A maintainer can trigger the advisory review via **workflow dispatch**:
+
+1. Go to [**Actions → AI Review (advisory)**](${WORKFLOW_URL})
+2. Click **Run workflow**
+3. Select branch: \`${BRANCH}\`
+4. Enter PR number: \`${PR_NUMBER}\`
+5. Click **Run workflow**
+
+The review will run in the base repository context with access to configuration (safe: never executes fork code, fetches diff via API only).
+
+Alternatively, wait for an approving review — the advisory will trigger automatically after the first approval.
+
+---
+_Automated message from the AI review workflow. See [\`docs/AI_REVIEW_GOVERNANCE.md § Fork Pull Requests\`](https://github.com/${REPO}/blob/develop/docs/AI_REVIEW_GOVERNANCE.md#fork-pull-requests) for details._"
           fi
 
       # Fail visibly when configuration is unavailable. Fork PRs cannot access
@@ -247,9 +316,9 @@ jobs:
           # lower it — the CLI also passes --floor pro.
           GEMINI_REVIEW_FLOOR: ${{ vars.GEMINI_REVIEW_FLOOR || 'pro' }}
           INFISICAL_PROJECT_ID: ${{ vars.INFISICAL_PROJECT_ID }}
-          # Resolves on all triggers: the event on pull_request, the input on
-          # dispatch and on workflow_call.
-          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
+          # Resolves on all triggers: the event on pull_request/pull_request_review,
+          # the input on dispatch and on workflow_call.
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
           # Short-lived, federated. Never a stored credential.
           GCP_ACCESS_TOKEN: ${{ steps.gcpauth.outputs.access_token }}
           GOOGLE_CLOUD_PROJECT: ${{ vars.GOOGLE_CLOUD_PROJECT || 'project-noemi' }}
@@ -275,7 +344,8 @@ jobs:
           # intentional halt; a wrapper that failed before reaching the runner
           # cannot have written it.
           export REVIEW_HALT_FILE="$RUNNER_TEMP/ai-review-halt"
-          rm -f "$REVIEW_HALT_FILE"
+          export REVIEW_FINDINGS_FILE="$RUNNER_TEMP/ai-review-findings.json"
+          rm -f "$REVIEW_HALT_FILE" "$REVIEW_FINDINGS_FILE"
           set +e
           infisical run --projectId="$INFISICAL_PROJECT_ID" --env=dev -- \
             node scripts/review-pr.js --pr "$PR_NUMBER" --floor pro --prefer-pro --prefer-preview-pro --allow-preview
@@ -288,4 +358,42 @@ jobs:
           if [[ $code -ne 0 ]]; then
             echo "::error title=Review failed::review-pr.js or its wrapper exited ${code}. No review was performed."
           fi
+          # Pass findings marker to the next step
+          if [[ -f "$REVIEW_FINDINGS_FILE" ]]; then
+            echo "has_blocking_findings=true" >> "$GITHUB_OUTPUT"
+            cat "$REVIEW_FINDINGS_FILE" > "$GITHUB_STEP_SUMMARY"
+          else
+            echo "has_blocking_findings=false" >> "$GITHUB_OUTPUT"
+          fi
           exit $code
+
+      # Dismiss the triggering approval when the advisory found blocking findings
+      # on a fork PR. This makes the PR non-mergeable until a maintainer
+      # re-approves after seeing the advisory comment. Phase 1 is advisory-only
+      # and not a required check, so dismissal is the mechanism by which fork PRs
+      # with findings become non-green without making the advisory itself blocking.
+      - name: Dismiss approval if blocking findings on fork PR
+        if: |
+          always() &&
+          steps.pr.outputs.is_fork_approval == 'true' &&
+          steps.config.outputs.configured == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          REVIEW_ID: ${{ github.event.review.id }}
+          FINDINGS_FILE: ${{ runner.temp }}/ai-review-findings.json
+        run: |
+          if [[ -f "$FINDINGS_FILE" ]]; then
+            BLOCKING_COUNT=$(jq -r '.blocking_count // 0' "$FINDINGS_FILE")
+            if (( BLOCKING_COUNT > 0 )); then
+              gh api --method PUT \
+                "repos/${{ github.repository }}/pulls/${PR_NUMBER}/reviews/${REVIEW_ID}/dismissals" \
+                -f message="Dismissing approval because the advisory AI review found ${BLOCKING_COUNT} blocking finding(s) (critical or high severity). Please review the advisory comment posted by @noemi-reviewer-bot, address the findings, and re-approve when ready. See docs/AI_REVIEW_GOVERNANCE.md § Fork Pull Requests § Re-approval after Advisory for details." \
+                -f event=DISMISS
+              echo "::notice title=Approval dismissed::Advisory found ${BLOCKING_COUNT} blocking findings. Dismissed the triggering approval; PR now requires re-approval after maintainer reviews advisory comment."
+            else
+              echo "::notice title=No blocking findings::Advisory completed with no blocking findings; approval stands."
+            fi
+          else
+            echo "::notice title=No findings marker::Review completed but no findings marker file found; assuming no blocking findings."
+          fi

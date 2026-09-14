@@ -526,10 +526,35 @@ When a fork PR arrives, the AI review workflow:
 2. **Fails visibly** with an error explaining the fork limitation
 3. Posts no green check that could be mistaken for a completed review
 
-### Reviewing fork PRs manually
+### Automatic trigger on approval (preferred)
 
-After the fork PR is opened, a maintainer can trigger the review via
-`workflow_dispatch`:
+The **easiest path** for fork PRs: just approve them. When you approve a fork PR,
+the advisory review **automatically triggers** in the base repository context:
+
+1. Fork PR arrives
+2. Automatic review fails visibly (GitHub withholds variables from fork PRs)
+3. Workflow posts a comment with instructions (see below)
+4. **You review the code and approve** (normal PR workflow)
+5. **Your approval triggers the advisory review automatically**
+6. Advisory runs safely in base-repo context and posts findings
+
+This is the preferred flow because it requires no extra steps — you approve when
+the code looks good, and the advisory runs automatically.
+
+**What happens after the advisory runs:**
+
+- **No blocking findings:** Your approval stands, PR is mergeable
+- **Blocking findings (critical/high):** The workflow **dismisses your approval**
+  with a message linking to the advisory comment. The PR becomes non-mergeable
+  until you (or another maintainer) **re-approve** after reviewing the advisory.
+  This ensures findings are seen before merge without making the advisory itself
+  a required check (phase 1 is advisory-only).
+- **Advisory halts or fails:** Your approval stands (a halt/error is not a verdict)
+
+### Manual trigger (when needed)
+
+If you want to see the advisory **before** approving, or if the auto-trigger
+fails, you can run the review manually via `workflow_dispatch`:
 
 1. Go to **Actions** → **AI Review (advisory)**
 2. Click **Run workflow**
@@ -549,13 +574,20 @@ access to configuration variables. This is safe because:
 The workflow also triggers on `pull_request_target`, which runs in the base
 repository context automatically. This is equally safe for the same reasons.
 
-**Note:** A fork PR that modifies `.github/workflows/ai-review.yml` will be
-reviewed under the **base branch's version** of that file, not the PR's version.
-The carve-out gate detects changes to the workflow and halts with escalation to
-human review.
+**Note:** When the automatic review fails and posts instructions, those
+instructions include the direct workflow URL pre-filled with the correct branch
+and PR number — click through and confirm rather than manually entering values.
+
+### Edge case: workflow modification
+
+A fork PR that modifies `.github/workflows/ai-review.yml` will be reviewed under
+the **base branch's version** of that file, not the PR's version. The carve-out
+gate detects changes to the workflow and halts with escalation to human review.
+CODEOWNERS requires owner approval for workflow files, ensuring a human sees the
+diff before it merges.
 
 See `docs/AI_REVIEW_GOVERNANCE.md` § Fork Pull Requests for the complete
-security analysis.
+security analysis and approval-dismissal state machine.
 
 ---
 

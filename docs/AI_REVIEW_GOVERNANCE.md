@@ -237,13 +237,81 @@ repository context with variables available. This is equally safe for the same
 reasons: no PR code is executed, the diff is API-fetched data, and the carve-out
 gate halts any attempt to modify the review workflow itself.
 
-**Residual risk:** A fork PR that modifies `.github/workflows/ai-review.yml`
-(the thin caller in fleet repos) will be reviewed under the caller's **previous
-version** from the base branch, not the version in the PR. The carve-out gate
-detects changes to this file and halts with escalation to human review, but the
-version of the workflow that runs that check is the base's version. Mitigation:
-CODEOWNERS requires owner approval for the workflow file, and that approval
-cannot come from a bot — a human must see the diff before it merges.
+### Auto-trigger on approval (preferred path)
+
+When a maintainer **approves** a fork PR, the advisory review **automatically
+triggers** in the base repository context via the `pull_request_review` event.
+This eliminates the need for manual `workflow_dispatch` in most cases:
+
+1. Fork PR arrives → automatic review fails visibly (no variables)
+2. Workflow posts a comment with manual trigger instructions
+3. Maintainer reviews the code and approves
+4. **Approval triggers the advisory review automatically**
+5. Advisory runs in base-repo context (safe: same design as dispatch)
+6. Advisory findings posted as a comment
+
+This flow is safe because it inherits the same protections as `workflow_dispatch`:
+no PR code checkout, API-fetched diff only, tooling-repo scripts.
+
+### Re-approval after advisory
+
+When the auto-triggered advisory review finds **blocking findings** (critical or
+high severity) on a fork PR, the workflow **dismisses the approval that triggered
+it** with a message referencing the advisory comment. This makes the PR
+**non-mergeable** until a maintainer:
+
+1. Reads the advisory findings posted by `@noemi-reviewer-bot`
+2. Determines whether the findings are valid
+3. Either requests changes from the contributor, or
+4. Re-approves the PR (accepting the findings or disagreeing with them)
+
+**Why dismissal, not a required check?** Phase 1 is advisory-only. The review is
+intentionally **not** a required status check (see **Phased rollout** below) —
+it posts findings, and a human decides what to do. Making it block merges would
+advance to phase 2 without the calibration evidence that phase 2 requires.
+
+Dismissing the triggering approval when blocking findings exist provides a
+**merge gate without changing the advisory's status**: the PR becomes non-green
+not because the advisory failed, but because the prior approval is no longer
+current. A maintainer who re-approves after reading the advisory is making an
+informed decision, which is the point.
+
+**Non-blocking outcomes:**
+- If the advisory finds **no blocking findings**, the approval stands and the PR
+  remains mergeable.
+- If the advisory **halts** (carve-out, Sentinel spec missing, model floor not
+  met), the approval stands — a halt is an escalation, not a review verdict.
+- If the advisory **fails** due to an error (API unavailable, timeout, etc.),
+  the approval stands and the failure is visible in the workflow run.
+
+This mechanism applies **only to fork PRs** where the review was auto-triggered by
+an approval (`pull_request_review` event with `state: approved`). In-repo branch
+PRs and manually dispatched reviews do not dismiss approvals.
+
+### Residual risks
+
+**1. Fork PR modifying `.github/workflows/ai-review.yml`:**
+   - **Risk:** The carve-out check runs under the base branch's version of the
+     workflow, not the PR's version
+   - **Mitigation:** The carve-out gate detects changes to this file and halts
+     with escalation to human review. Additionally, CODEOWNERS requires owner
+     approval for workflow files, and that approval cannot come from a bot — a
+     human must see the diff before it merges
+   - **Severity:** Low — requires both defeating the carve-out gate AND bypassing
+     human code-owner review
+
+**2. Approval dismissal abuse:**
+   - **Risk:** A malicious fork PR could craft a diff that causes the advisory to
+     spuriously report blocking findings, triggering dismissal of a legitimate
+     approval
+   - **Mitigation:** The advisory reviews code content, not code execution, so a
+     malicious diff would need to defeat the Gemini reviewer's detection of
+     injection attempts (prompt injection is itself a critical finding). The
+     dismissal message includes the findings count and links to the advisory
+     comment, so spurious dismissals are visible and can be overridden by
+     re-approving
+   - **Severity:** Low — requires defeating cross-model adversarial review, and
+     the maintainer can override by re-approving
 
 ## Audit
 
