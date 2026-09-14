@@ -238,6 +238,30 @@ access to configuration, but remains safe because:
 - Review scripts come from the base repo, not from the PR, so a malicious PR
   cannot rewrite the reviewer that judges it
 
+### Split-check pattern: fork notice vs. privileged advisory
+
+The workflow defines **two jobs with distinct check names** to prevent race
+conditions and silent pass-through:
+
+1. **"AI Review (fork notice)"** — Unprivileged, runs on `pull_request` when
+   config unavailable (fork PRs). Fails visibly with instructions. **NOT** a
+   required check on `develop`.
+
+2. **"AI Review (advisory)"** — Privileged, runs actual review on in-repo
+   `pull_request` (with config), `pull_request_target: [labeled]` (ai-review
+   label), and `workflow_dispatch`. **IS REQUIRED** on `develop` branch protection.
+
+**Why split:** A single-job workflow with conditional steps would show green when
+skipped on fork PRs, defeating the "no silent pass" requirement. The split also
+prevents the race condition where a fork PR could merge while the label-gated
+advisory is still pending — GitHub blocks merge while the required "AI Review
+(advisory)" check is running.
+
+**Branch protection requirement:** `develop` branch protection MUST require the
+"AI Review (advisory)" check (exact name). Fork PRs cannot merge until a
+maintainer adds the `ai-review` label and the advisory completes. In-repo
+branches receive the advisory automatically via `pull_request`.
+
 ### Label-gated privileged review (preferred path)
 
 **Design rationale:** Three safe options exist for privileged fork PR review:
@@ -248,8 +272,8 @@ gate is chosen as the **lightest design** because it is the most discoverable
 logic, and integrates naturally into the PR workflow (review code → add label).
 `workflow_dispatch` remains available as a fallback.
 
-When a maintainer adds the **`ai-review` label** to a fork PR, the advisory
-review **automatically triggers** in the base repository context via
+When a maintainer adds the **`ai-review` label** to a fork PR, the "AI Review
+(advisory)" job **automatically triggers** in the base repository context via
 `pull_request_target: types: [labeled]`:
 
 1. Fork PR arrives → automatic review fails visibly (no variables)
@@ -272,41 +296,44 @@ but is safe because:
 - Diff fetched via API only (read-only data, never executed)
 - Review scripts from tooling repo, not from PR under review
 
-### Re-review after advisory findings
+### Dismissal of approvals on blocking findings
 
-When the label-gated advisory review finds **blocking findings** (critical or
-high severity) on a fork PR, the workflow **removes the `ai-review` label** that
-gated the review. This signals that the PR needs attention:
+When the privileged advisory review finds **blocking findings** (critical or high
+severity), the workflow **dismisses all existing approving reviews** on that PR:
 
-1. Maintainer reads the advisory findings posted by `@noemi-reviewer-bot`
-2. Determines whether the findings are valid
-3. Either requests changes from the contributor, or
-4. Re-adds the `ai-review` label to re-run the advisory (after contributor
-   addresses findings or if maintainer accepts them)
+1. Advisory completes with blocking findings
+2. Workflow queries PR for approving reviews
+3. Each approval is dismissed via GitHub API with message: "Advisory AI review
+   found N blocking finding(s) after this approval. Review advisory comment by
+   @noemi-reviewer-bot and re-approve when findings are addressed or accepted."
+4. PR becomes non-mergeable (branch protection requires approval on `develop`)
+5. Maintainer reads advisory findings, then either:
+   - Requests changes from contributor, or
+   - Re-approves after determining findings are addressed or acceptable
 
-**Why remove the label instead of making the advisory a required check?** Phase 1
-is advisory-only. The review is intentionally **not** a required status check
-(see **Phased rollout** below) — it posts findings, and a human decides what to
-do. Making it block merges would advance to phase 2 without the calibration
-evidence that phase 2 requires.
+**Why dismiss approvals?** Phase 1 is advisory-only — the "AI Review (advisory)"
+check itself **succeeds even when findings exist** (it posts findings and a human
+decides what to do). Without approval dismissal, a PR with an approval made
+*before* the advisory ran would remain mergeable despite blocking findings.
+Dismissing the approval creates the merge gate: someone must explicitly re-approve
+*after* seeing the advisory, which is the informed-decision point.
 
-Removing the label when blocking findings exist provides a **visible signal
-without changing the advisory's status**: the maintainer must consciously re-add
-the label (or use workflow_dispatch) to re-run the review after seeing the
-findings. This ensures blocking findings are acknowledged without making the
-advisory itself a merge gate.
+**When dismissal applies:**
+- Label-gated review (`pull_request_target: [labeled]`): dismisses + removes label
+- Manual dispatch (`workflow_dispatch`): dismisses (keeps label if present)
+- In-repo `pull_request`: dismisses if approvals exist
 
-**Non-blocking outcomes:**
-- If the advisory finds **no blocking findings**, the label remains and the PR
-  stays in a normal state.
-- If the advisory **halts** (carve-out, Sentinel spec missing, model floor not
-  met), the label remains — a halt is an escalation, not a review verdict.
-- If the advisory **fails** due to an error (API unavailable, timeout, etc.),
-  the label remains and the failure is visible in the workflow run.
+**Non-dismissal outcomes:**
+- **No blocking findings:** Approvals stand, label remains, PR mergeable
+- **Advisory halts:** Approvals stand (carve-out, Sentinel spec missing —
+  escalation, not a verdict)
+- **Advisory fails:** Approvals stand (API error, timeout — technical failure,
+  not a review verdict)
 
-This mechanism applies **only to fork PRs** where the review was triggered by the
-`ai-review` label (`pull_request_target: [labeled]` event). In-repo branch PRs
-and manually dispatched reviews do not remove labels.
+**Recommended GitHub setting:** Enable "Dismiss stale pull request approvals when
+new commits are pushed" on `develop` branch protection. This ensures approvals
+are dismissed when a contributor pushes fixes, so the re-approval after advisory
+is also re-approval after changes.
 
 ### Residual risks
 
@@ -413,6 +440,19 @@ protection. It:
 ```bash
 bash scripts/setup-branch-protection.sh
 ```
+
+**REQUIRED:** After running the script, manually add "AI Review (advisory)" as a
+required status check on `develop` branch protection (GitHub UI: Settings →
+Branches → `develop` → Edit → Require status checks → search "AI Review
+(advisory)" → check it → Save). This activates the fork PR race-condition
+protection: fork PRs cannot merge while the advisory is pending, and cannot merge
+if no advisory ever ran. The unprivileged "AI Review (fork notice)" check is
+**NOT** required (it fails on fork PRs by design).
+
+The setup script does not add this automatically because the check must exist
+(have run at least once) before it can be required, and a fresh deployment has no
+runs yet. After the first in-repo PR receives an advisory review, the check
+becomes visible and can be required.
 
 Before requiring code-owner reviews on `develop`, decide the co-owner question.
 With a single owner and `require_code_owner_reviews` enabled, a PR authored by
