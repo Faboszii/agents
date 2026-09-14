@@ -233,8 +233,10 @@ non-secrets harder to audit.
 ⚠️ `GCP_WIF_PROVIDER` takes the project **number**, not the project ID. Using the
 ID fails with a message that does not mention which field is wrong.
 
-The workflow requires **all six** and skips with a notice naming the missing
-ones — so a partial rollout is safe, but a green job does not mean a review ran.
+The workflow requires **all six** and fails visibly when any are missing. Fork
+PRs cannot access organization variables (GitHub security model), so they fail
+with a clear error. Maintainers can trigger reviews on fork PRs manually via
+`workflow_dispatch` — see **Fork Pull Requests** below.
 
 ## Enable the API
 
@@ -512,7 +514,52 @@ than no review, because you would trust it.
 
 ---
 
-# Part 6 — How a review actually goes
+# Part 6 — Fork Pull Requests
+
+GitHub withholds organization and repository Actions variables from workflows
+triggered by fork pull requests on the `pull_request` event. This prevents
+malicious fork PRs from exfiltrating secrets via workflow code.
+
+When a fork PR arrives, the AI review workflow:
+
+1. Detects missing configuration variables
+2. **Fails visibly** with an error explaining the fork limitation
+3. Posts no green check that could be mistaken for a completed review
+
+### Reviewing fork PRs manually
+
+After the fork PR is opened, a maintainer can trigger the review via
+`workflow_dispatch`:
+
+1. Go to **Actions** → **AI Review (advisory)**
+2. Click **Run workflow**
+3. Select the base branch (`develop` or `main`)
+4. Enter the PR number
+5. Run
+
+The `workflow_dispatch` path runs in the base repository context with full
+access to configuration variables. This is safe because:
+
+- The workflow **never checks out the PR head code** — only the tooling
+  repository (`project-noemi/agents`) at a pinned, trusted ref
+- The diff is fetched over the **GitHub API** as read-only data
+- Review scripts come from the base repo, not from the PR, so a malicious PR
+  cannot rewrite its own reviewer
+
+The workflow also triggers on `pull_request_target`, which runs in the base
+repository context automatically. This is equally safe for the same reasons.
+
+**Note:** A fork PR that modifies `.github/workflows/ai-review.yml` will be
+reviewed under the **base branch's version** of that file, not the PR's version.
+The carve-out gate detects changes to the workflow and halts with escalation to
+human review.
+
+See `docs/AI_REVIEW_GOVERNANCE.md` § Fork Pull Requests for the complete
+security analysis.
+
+---
+
+# Part 7 — How a review actually goes
 
 The reviewer works in three gates, **in order**, and stops at the first failure.
 
@@ -557,7 +604,7 @@ what was actually found.
 
 ---
 
-# Part 7 — What the AI is never allowed to touch
+# Part 8 — What the AI is never allowed to touch
 
 Some files are excluded from AI review entirely:
 
@@ -577,7 +624,7 @@ editing the merge gate to unblock its own pull requests.
 
 ---
 
-# Fleet deployment — every repository, one reviewer
+# Part 9 — Fleet deployment — every repository, one reviewer
 
 One repository proves the loop; the fleet is where it pays. The design keeps
 review logic in exactly one place:

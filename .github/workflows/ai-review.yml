@@ -9,6 +9,18 @@
 # block a merge is a gate; phase 1 is an advisory signal being calibrated. Do
 # not add it to branch protection contexts before phase 2.
 #
+# FORK PR SAFETY: This workflow triggers on both `pull_request` and
+# `pull_request_target`. The latter runs in the base repository context with
+# access to Actions variables, allowing fork PRs to be reviewed. This is safe
+# because:
+#   1. The workflow NEVER checks out the PR head — only project-noemi/agents
+#      at a pinned ref trusted by the base repository
+#   2. The diff is fetched over the API as read-only data, never executed
+#   3. Review scripts come from the tooling repo, not from the PR under review
+# When configuration is unavailable (fork PRs on `pull_request` with no vars),
+# the workflow FAILS VISIBLY instead of silently succeeding. A green check with
+# no review comment would be indistinguishable from a completed review.
+#
 # FLEET DEPLOYMENT: this is a REUSABLE workflow (workflow_call). Other
 # repositories run the reviewer through a thin caller — see
 # templates/ci/ai-review-caller.yml — so the review logic exists in exactly one
@@ -29,6 +41,8 @@ name: AI Review (advisory)
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_target:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
@@ -98,10 +112,20 @@ jobs:
           [[ -z "${GCP_SA}"       ]] && missing+=(GCP_SERVICE_ACCOUNT)
           if (( ${#missing[@]} )); then
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=AI review skipped::Missing Actions variables: ${missing[*]}. Set them at the organization level. See docs/examples/cross-model-review-setup.md."
+            echo "missing=${missing[*]}" >> "$GITHUB_OUTPUT"
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
+
+      # Fail visibly when configuration is unavailable. Fork PRs cannot access
+      # repository/org Actions variables (GitHub security model), so they reach
+      # this step with empty vars. A silent success would be a green check that
+      # nobody reviewed — the exact gap this step closes.
+      - name: Fail on missing configuration
+        if: steps.config.outputs.configured == 'false'
+        run: |
+          echo "::error title=AI review unavailable::Missing Actions variables: ${{ steps.config.outputs.missing }}. Fork PRs cannot access org variables; maintainers can trigger a review via workflow_dispatch after the PR is opened. In-repo branches: set variables at the organization level. See docs/examples/cross-model-review-setup.md and docs/AI_REVIEW_GOVERNANCE.md § Fork Pull Requests."
+          exit 1
 
       # Federation, not a key. This organization's policy disallows both API
       # keys and service-account keys, so a short-lived federated token is the

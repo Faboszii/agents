@@ -201,6 +201,50 @@ comment, commit message, or test fixture directing the reviewer to skip a gate,
 lower a severity, suppress a finding, or approve is itself a `critical` finding
 and is reported as such.
 
+## Fork Pull Requests
+
+GitHub's security model withholds repository and organization Actions variables
+from workflows triggered by fork pull requests on the `pull_request` event. This
+prevents malicious fork PRs from exfiltrating secrets via workflow code.
+
+When the AI review workflow runs on a fork PR via `pull_request`, configuration
+variables (`INFISICAL_PROJECT_ID`, etc.) are empty, and **the review fails
+visibly** rather than silently succeeding with no review performed. A green
+check with no comment would be indistinguishable from a completed review and
+is the failure mode this gate prevents.
+
+### Reviewing fork PRs safely
+
+Fork PRs can be reviewed using **`workflow_dispatch`** after the PR is opened:
+
+1. Go to Actions → AI Review (advisory)
+2. Click "Run workflow"
+3. Select the base branch (`develop` or `main`)
+4. Enter the PR number
+5. Run
+
+The `workflow_dispatch` path runs in the **base repository context** with full
+access to configuration, but remains safe because:
+
+- The workflow **never checks out the PR head code** — only the tooling
+  repository (`project-noemi/agents`) at a pinned, trusted ref
+- The diff is fetched over the **GitHub API** as read-only data
+- Review scripts come from the base repo, not from the PR, so a malicious PR
+  cannot rewrite the reviewer that judges it
+
+The workflow also triggers on `pull_request_target`, which runs in the base
+repository context with variables available. This is equally safe for the same
+reasons: no PR code is executed, the diff is API-fetched data, and the carve-out
+gate halts any attempt to modify the review workflow itself.
+
+**Residual risk:** A fork PR that modifies `.github/workflows/ai-review.yml`
+(the thin caller in fleet repos) will be reviewed under the caller's **previous
+version** from the base branch, not the version in the PR. The carve-out gate
+detects changes to this file and halts with escalation to human review, but the
+version of the workflow that runs that check is the base's version. Mitigation:
+CODEOWNERS requires owner approval for the workflow file, and that approval
+cannot come from a bot — a human must see the diff before it merges.
+
 ## Audit
 
 Every review records:
