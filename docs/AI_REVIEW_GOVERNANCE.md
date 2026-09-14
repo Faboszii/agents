@@ -240,6 +240,14 @@ access to configuration, but remains safe because:
 
 ### Label-gated privileged review (preferred path)
 
+**Design rationale:** Three safe options exist for privileged fork PR review:
+(1) label gate via `pull_request_target: [labeled]`, (2) `workflow_run` after
+approval with API trust check, or (3) `workflow_dispatch` as primary path. Label
+gate is chosen as the **lightest design** because it is the most discoverable
+(visible in PR UI like any other label), requires no separate trust-checking
+logic, and integrates naturally into the PR workflow (review code → add label).
+`workflow_dispatch` remains available as a fallback.
+
 When a maintainer adds the **`ai-review` label** to a fork PR, the advisory
 review **automatically triggers** in the base repository context via
 `pull_request_target: types: [labeled]`:
