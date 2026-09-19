@@ -193,7 +193,7 @@ Existing automation prefixes remain valid where those workflows create them (the
 - `sync/upstream-*` — upstream synchronization
 - `claude/*` — Claude-initiated agent work
 - `doc/*` — documentation automation
-- `cursor/*` — Cursor Cloud Agent work (this session uses this prefix with the `-b6b1` suffix)
+- `cursor/*` — Cursor Cloud Agent work; use the `cursor/` prefix without session-specific identifiers.
 
 #### Examples
 
