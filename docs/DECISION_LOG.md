@@ -1289,3 +1289,9 @@
 - **Decision:** Instruction-following for three canonical skills (`risk-triage`, `issue-intake`, `spec-author`) is checked by `scripts/skill-utility-eval.js`: extract Ask First and Never from Boundaries, score a recorded action list, fail on a Never match or an Ask First match without `asked: true`. This is not an LLM-as-judge rollout. Live-model transcripts can use the same JSON later. Heading presence remains `audit-repo.js`.
 - **Context:** 2026 skill evals measure whether the agent followed the procedure, not whether the markdown still has the section. The spec library has no in-repo runtime, so the first increment is a deterministic rubric over fixtures.
 - **Impact:** `tests/skill-utility-eval.test.js` is part of `npm test`. Dropping a Never line from a canonical skill fails extraction; a fixture that performs a forbidden action fails the score.
+
+## [2026-09-23-0001] NoéMI Knowledge MCP on separate origin
+
+- **Decision:** Host a real Streamable HTTP MCP knowledge server at `mcp.noemi.newpush.com` (Cloudflare Worker in `services/noemi-knowledge-mcp`), with tools `search_knowledge`, `get_document`, `list_documents` over an embedded public corpus (Bible, governance, methodology, Phase 0, skills-dist). Publish an honest SEP server-card with `remotes` pointing at `/mcp`. Do **not** claim MCP on the marketing origin (`noemi.newpush.com`).
+- **Context:** isitagentready MCP Server Card on the marketing site was rejected as theater (#569 closed). A separate origin keeps the marketing deploy thin and makes discovery accurate.
+- **Impact:** Operator must deploy the Worker + attach custom domain; optional DNS-AID `_mcp._agents.noemi`; website may later link the card from api-catalog.
