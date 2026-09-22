@@ -14,7 +14,7 @@ const agentsRoot = path.resolve(serviceRoot, "../..");
 const outFile = path.join(serviceRoot, "src/corpus.generated.json");
 
 /**
- * Curated public corpus only (Decision [2026-09-22-0001]).
+ * Curated public corpus only (Decision [2026-09-22-0003]).
  * Do NOT include MACHINE_IDENTITY / internal identity registers or other
  * admin-architecture docs — those are not public knowledge-base material.
  */
