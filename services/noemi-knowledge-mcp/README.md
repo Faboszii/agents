@@ -50,5 +50,6 @@ Add an `api-catalog` / Link entry pointing at
 
 ## Security
 
-- Corpus is **public** docs only — no secrets, no PII, no admin data.
-- No auth on v0.1 (read-only public knowledge). Add Cloudflare Access / OAuth later if needed.
+- Corpus is **curated public** docs only: Bible (`PROJECT_REFERENCE`), governance, methodology, Phase 0 baseline, and `skills-dist` skill markdown.
+- Explicitly **excluded**: `MACHINE_IDENTITY.md`, identity registers, and other internal admin-architecture docs.
+- No secrets / PII. No auth on v0.1 (read-only). Add Cloudflare Access / OAuth later if needed.

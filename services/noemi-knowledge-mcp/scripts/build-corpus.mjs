@@ -13,16 +13,17 @@ const serviceRoot = path.resolve(__dirname, "..");
 const agentsRoot = path.resolve(serviceRoot, "../..");
 const outFile = path.join(serviceRoot, "src/corpus.generated.json");
 
+/**
+ * Curated public corpus only (Decision [2026-09-22-0001]).
+ * Do NOT include MACHINE_IDENTITY / internal identity registers or other
+ * admin-architecture docs — those are not public knowledge-base material.
+ */
 /** @type {{ path: string, title?: string }[]} */
 const SOURCES = [
   { path: "docs/PROJECT_REFERENCE.md", title: "NoéMI Bible / Project Reference" },
   { path: "docs/GOVERNANCE.md", title: "Governance" },
   { path: "docs/METHODOLOGY.md", title: "Methodology" },
   { path: "docs/PHASE_ZERO_SECURITY_BASELINE.md", title: "Phase 0 Security Baseline" },
-  { path: "docs/MACHINE_IDENTITY.md", title: "Machine Identity" },
-  { path: "docs/TRANSPARENT_SOURCE.md", title: "Transparent Source" },
-  { path: "docs/SOVEREIGN_LLM_GUIDELINES.md", title: "Sovereign LLM Guidelines" },
-  { path: "README.md", title: "Agents README" },
 ];
 
 function walkSkillsDist() {
