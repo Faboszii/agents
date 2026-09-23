@@ -8,7 +8,9 @@
     "build:corpus": "node scripts/build-corpus.mjs",
     "dev": "npm run build:corpus && wrangler dev",
     "deploy": "npm run build:corpus && wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build:corpus && vitest run",
+    "test:watch": "vitest"
   },
   "engines": {
     "node": ">=24"
@@ -24,6 +26,7 @@
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260921.1",
     "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
     "wrangler": "^4.34.0"
   }
 }

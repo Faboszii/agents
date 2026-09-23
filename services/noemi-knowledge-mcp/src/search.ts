@@ -18,17 +18,24 @@ type Corpus = {
 
 const corpus = corpusJson as Corpus;
 
+/** Hard caps for DoS resistance (also enforced in tool Zod schemas). */
+export const MAX_QUERY_CHARS = 500;
+export const MAX_QUERY_TOKENS = 64;
+export const MAX_PATH_OR_ID_CHARS = 512;
+
 function tokenize(q: string): string[] {
   return q
     .toLowerCase()
     .replace(/[^a-z0-9\s_-]+/g, " ")
     .split(/\s+/)
-    .filter((t) => t.length > 2);
+    .filter((t) => t.length > 2)
+    .slice(0, MAX_QUERY_TOKENS);
 }
 
 /** Simple TF overlap search over embedded corpus chunks. */
 export function searchKnowledge(query: string, limit = 5): CorpusChunk[] {
-  const qTokens = tokenize(query);
+  const clipped = query.slice(0, MAX_QUERY_CHARS);
+  const qTokens = tokenize(clipped);
   if (qTokens.length === 0) return [];
   const scored = corpus.chunks.map((chunk) => {
     let score = 0;

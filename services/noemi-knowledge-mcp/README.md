@@ -56,3 +56,5 @@ api-catalog / Link discovery. Merge/promote that PR only after this host returns
 - Corpus is **curated public** docs only: Bible (`PROJECT_REFERENCE`), governance, methodology, Phase 0 baseline, and `skills-dist` skill markdown.
 - Explicitly **excluded**: `MACHINE_IDENTITY.md`, identity registers, and other internal admin-architecture docs.
 - No secrets / PII. No auth on v0.1 (read-only). Add Cloudflare Access / OAuth later if needed.
+- `/mcp` has an isolate-local SHA-256 IP rate limit (60 req / 15 min, fail-open). Pair with Cloudflare Rate Limiting / WAF for global enforcement.
+- Tool inputs cap query / path length to resist CPU exhaustion.

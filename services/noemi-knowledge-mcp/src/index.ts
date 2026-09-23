@@ -1,18 +1,29 @@
 import { createMcpHandler } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { checkRateLimit, extractRequestIp } from "./rate-limit";
 import {
+  MAX_PATH_OR_ID_CHARS,
+  MAX_QUERY_CHARS,
   corpusMeta,
   getDocument,
   listDocuments,
   searchKnowledge,
 } from "./search";
+import { buildServerCard } from "./server-card";
 
 export interface Env {
   PUBLIC_ORIGIN: string;
   SERVICE_NAME: string;
   SERVICE_VERSION: string;
 }
+
+/** Public MCP transport budget (per hashed IP, per isolate). */
+const MCP_RATE_LIMIT = {
+  route: "mcp",
+  maxRequests: 60,
+  windowMs: 15 * 60 * 1000,
+} as const;
 
 function createServer(env: Env) {
   const server = new McpServer({
@@ -26,7 +37,11 @@ function createServer(env: Env) {
       description:
         "Search the Project NoéMI public knowledge corpus (Bible, governance, methodology, Phase 0, skills). Returns ranked markdown chunks.",
       inputSchema: {
-        query: z.string().min(1).describe("Natural language or keyword query"),
+        query: z
+          .string()
+          .min(1)
+          .max(MAX_QUERY_CHARS)
+          .describe("Natural language or keyword query"),
         limit: z.number().int().min(1).max(20).optional(),
       },
     },
@@ -62,6 +77,7 @@ function createServer(env: Env) {
         pathOrId: z
           .string()
           .min(1)
+          .max(MAX_PATH_OR_ID_CHARS)
           .describe("Document path or chunk id returned by search_knowledge"),
       },
     },
@@ -123,35 +139,6 @@ function createServer(env: Env) {
   return server;
 }
 
-function serverCard(env: Env) {
-  const origin = (env.PUBLIC_ORIGIN || "https://mcp.noemi.newpush.com").replace(
-    /\/+$/,
-    ""
-  );
-  return {
-    $schema:
-      "https://static.modelcontextprotocol.io/schemas/v1/server-card.schema.json",
-    name: env.SERVICE_NAME || "com.newpush/noemi-knowledge-mcp",
-    version: env.SERVICE_VERSION || "0.1.0",
-    title: "NoéMI Knowledge MCP",
-    description:
-      "Searchable Project NoéMI public knowledge base (Bible, governance, methodology, Phase 0, skills) over Streamable HTTP.",
-    websiteUrl: "https://noemi.newpush.com",
-    repository: {
-      url: "https://github.com/project-noemi/agents",
-      source: "github",
-      subfolder: "services/noemi-knowledge-mcp",
-    },
-    remotes: [
-      {
-        type: "streamable-http",
-        url: `${origin}/mcp`,
-        supportedProtocolVersions: ["2025-06-18", "2025-03-26"],
-      },
-    ],
-  };
-}
-
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
@@ -160,7 +147,7 @@ export default {
       url.pathname === "/.well-known/mcp/server-card.json" ||
       url.pathname === "/server-card"
     ) {
-      return Response.json(serverCard(env), {
+      return Response.json(buildServerCard(env), {
         headers: {
           "Cache-Control": "public, max-age=300",
           "Access-Control-Allow-Origin": "*",
@@ -180,6 +167,20 @@ export default {
     }
 
     if (url.pathname === "/mcp" || url.pathname.startsWith("/mcp/")) {
+      const ip = extractRequestIp(request);
+      const allowed = await checkRateLimit(ip, MCP_RATE_LIMIT);
+      if (!allowed) {
+        return Response.json(
+          { error: "rate_limited" },
+          {
+            status: 429,
+            headers: {
+              "Retry-After": "60",
+              "Access-Control-Allow-Origin": "*",
+            },
+          }
+        );
+      }
       const handler = createMcpHandler(createServer(env));
       return handler(request, env, ctx);
     }
