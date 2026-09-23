@@ -14,9 +14,12 @@
     "node": ">=24"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.0",
+    "@modelcontextprotocol/sdk": "1.23.0",
     "agents": "^0.2.0",
     "zod": "^3.25.0"
+  },
+  "overrides": {
+    "@modelcontextprotocol/sdk": "1.23.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260921.1",
