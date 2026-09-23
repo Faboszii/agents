@@ -5,8 +5,9 @@ knowledge corpus for Project NoéMI (Bible, governance, methodology, Phase 0,
 `skills-dist`).
 
 This is a **real** MCP transport (Streamable HTTP at `/mcp`) on a **separate
-origin** from the marketing site — so `/.well-known/mcp/server-card.json` is
-honest (Decision 217 withdrawn theater; this replaces it).
+origin** from the marketing site. Agents use it to query Project NoéMI doctrine
+and skills (Decision `[2026-09-22-0003]`). The marketing origin publishes
+discovery only (website Decision 220 / PR #572) and must not host a fake `/mcp`.
 
 ## Tools
 
@@ -45,8 +46,10 @@ npm run deploy
 
 ### Marketing site follow-up
 
-Add an `api-catalog` / Link entry pointing at  
-`https://mcp.noemi.newpush.com/.well-known/mcp/server-card.json` once DNS is live.
+Website PR **#572** publishes `/.well-known/mcp/server-card.json` on
+`noemi.newpush.com` with `remotes` → `https://mcp.noemi.newpush.com/mcp`, plus
+api-catalog / Link discovery. Merge/promote that PR only after this host returns
+200 for the card and `/mcp`.
 
 ## Security
 
